@@ -1,0 +1,13 @@
+[build]
+  publish = "public"
+
+[build.environment]
+  NODE_VERSION = "20"
+  NODE_ENV = "production"
+
+# If your Express backend server is hosted on Render, Railway, or a VPS,
+# replace 'https://YOUR-BACKEND-API.onrender.com' with your actual backend server URL below:
+[[redirects]]
+  from = "/api/*"
+  to = "https://YOUR-BACKEND-API.onrender.com/api/:splat"
+  status = 200

@@ -1,0 +1,20 @@
+{
+  "name": "youtube-downloader-website",
+  "version": "1.0.0",
+  "description": "Modern, fast, and responsive YouTube Video & Audio Downloader Web Application",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "build": "echo 'Build complete'"
+  },
+  "dependencies": {
+    "@distube/ytdl-core": "^4.16.12",
+    "@ffprobe-installer/ffprobe": "^2.1.2",
+    "axios": "^1.7.9",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "ffmpeg-static": "^5.3.0"
+  }
+}
