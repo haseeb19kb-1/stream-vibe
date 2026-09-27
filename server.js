@@ -474,10 +474,33 @@ app.get('/api/download', async (req, res) => {
   });
 });
 
+// Favicon handler
+app.get('/favicon.ico', (req, res) => {
+  const faviconPath = path.join(__dirname, 'public', 'favicon.ico');
+  if (fs.existsSync(faviconPath)) {
+    return res.sendFile(faviconPath);
+  }
+  return res.status(204).end();
+});
+
 // Serve frontend for all standard routes
 app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  res.sendFile(path.join(__dirname, 'public', 'index.html'), (err) => {
+    if (err && !res.headersSent) {
+      console.error('Error sending index.html:', err);
+      res.status(500).json({ error: 'Failed to serve index page.' });
+    }
+  });
 });
+
+// Global error handler
+app.use((err, req, res, next) => {
+  console.error('Unhandled Server Error:', err);
+  if (!res.headersSent) {
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
 
 // Start server
 let activePort = PORT;
