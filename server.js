@@ -90,6 +90,29 @@ function formatViews(views) {
   return n.toLocaleString();
 }
 
+// In-memory cache for video metadata (1 hour TTL)
+const infoCache = new Map();
+const CACHE_TTL_MS = 60 * 60 * 1000;
+
+function getCachedInfo(videoId) {
+  const item = infoCache.get(videoId);
+  if (!item) return null;
+  if (Date.now() - item.timestamp > CACHE_TTL_MS) {
+    infoCache.delete(videoId);
+    return null;
+  }
+  return item.data;
+}
+
+function setCachedInfo(videoId, data) {
+  // Limit cache size to 200 items
+  if (infoCache.size > 200) {
+    const firstKey = infoCache.keys().next().value;
+    infoCache.delete(firstKey);
+  }
+  infoCache.set(videoId, { timestamp: Date.now(), data });
+}
+
 // Inspect media streams using FFprobe
 function validateFileStreams(filePath) {
   return new Promise((resolve, reject) => {
@@ -160,9 +183,10 @@ app.get('/api/sample', (req, res) => {
       { quality: 'Standard', url: 'https://img.youtube.com/vi/dQw4w9WgXcQ/default.jpg' }
     ],
     videoFormats: [
-      { itag: '137', quality: '1080p Full HD', format: 'mp4', size: '~77 MB', fps: 30, hasAudio: true },
-      { itag: '22', quality: '720p HD', format: 'mp4', size: '~25 MB', fps: 30, hasAudio: true },
-      { itag: '18', quality: '360p Medium', format: 'mp4', size: '~11 MB', fps: 30, hasAudio: true }
+      { itag: '271', quality: '2K Ultra HD', height: 1440, format: 'mp4', size: '45.8 MB', fps: 60, hasAudio: true },
+      { itag: '137', quality: '1080p Full HD', height: 1080, format: 'mp4', size: '32.4 MB', fps: 60, hasAudio: true },
+      { itag: '22', quality: '720p HD', height: 720, format: 'mp4', size: '18.7 MB', fps: 30, hasAudio: true },
+      { itag: '18', quality: '360p Medium', height: 360, format: 'mp4', size: '24.4 MB', fps: 25, hasAudio: true }
     ],
     audioFormats: [
       { itag: '140', quality: '320 kbps (High)', format: 'mp3', size: '~3.3 MB' },
@@ -171,7 +195,7 @@ app.get('/api/sample', (req, res) => {
   });
 });
 
-// Fetch Video Information API using yt-dlp
+// Fetch Video Information API using yt-dlp + Cache
 app.post('/api/info', async (req, res) => {
   const { url } = req.body;
   if (!url || typeof url !== 'string') {
@@ -183,17 +207,26 @@ app.post('/api/info', async (req, res) => {
     return res.status(400).json({ error: 'Invalid YouTube URL format. Please check the URL and try again.' });
   }
 
+  // Check cache first for instant 0ms metadata response
+  const cachedData = getCachedInfo(videoId);
+  if (cachedData) {
+    console.log(`[INFO CACHE HIT] Served info for video ID: ${videoId}`);
+    return res.json(cachedData);
+  }
+
   const standardUrl = `https://www.youtube.com/watch?v=${videoId}`;
   const args = [
     '--js-runtimes', 'node',
     '--cache-dir', CACHE_DIR,
     '--socket-timeout', '10',
+    '--no-warnings',
+    '--no-call-home',
     '-J',
     '--no-playlist',
     standardUrl
   ];
 
-  execFile(YTDLP_PATH, args, { maxBuffer: 15 * 1024 * 1024, timeout: 25000 }, (error, stdout, stderr) => {
+  execFile(YTDLP_PATH, args, { maxBuffer: 20 * 1024 * 1024, timeout: 20000 }, (error, stdout, stderr) => {
     if (error) {
       console.error(`yt-dlp info error for ${videoId}:`, stderr || error.message);
       
@@ -220,9 +253,10 @@ app.post('/api/info', async (req, res) => {
 
       for (const f of rawVideoFormats) {
         const height = f.height || 0;
+        if (height < 360) continue;
         let qualityLabel = f.format_note || (height ? `${height}p` : 'SD');
-        if (height >= 2160) qualityLabel = '4K (2160p)';
-        else if (height >= 1440) qualityLabel = '2K (1440p)';
+        if (height >= 2160) qualityLabel = '4K Ultra HD';
+        else if (height >= 1440) qualityLabel = '2K Ultra HD';
         else if (height >= 1080) qualityLabel = '1080p Full HD';
         else if (height >= 720) qualityLabel = '720p HD';
         else if (height >= 480) qualityLabel = '480p SD';
@@ -236,16 +270,27 @@ app.post('/api/info', async (req, res) => {
           if (f.filesize) {
             sizeText = `${(f.filesize / (1024 * 1024)).toFixed(1)} MB`;
           } else if (f.filesize_approx) {
-            sizeText = `~${(f.filesize_approx / (1024 * 1024)).toFixed(1)} MB`;
+            sizeText = `${(f.filesize_approx / (1024 * 1024)).toFixed(1)} MB`;
+          } else if (data.duration) {
+            let br = 1500;
+            if (height >= 2160) br = 16000;
+            else if (height >= 1440) br = 8500;
+            else if (height >= 1080) br = 4200;
+            else if (height >= 720) br = 2100;
+            else if (height >= 480) br = 1200;
+            else if (height >= 360) br = 650;
+            const approxBytes = ((br * 1024 / 8) * data.duration);
+            sizeText = `${(approxBytes / (1024 * 1024)).toFixed(1)} MB`;
           }
 
           videoFormats.push({
             itag: String(f.format_id || '18'),
             quality: qualityLabel,
+            height: height,
             format: 'mp4',
             size: sizeText,
-            fps: f.fps || 30,
-            hasAudio: true, // Merged output guarantees audio
+            fps: f.fps || (height >= 1080 ? 60 : 30),
+            hasAudio: true,
             url: f.url || null
           });
         }
@@ -298,7 +343,7 @@ app.post('/api/info', async (req, res) => {
         { quality: 'Default (360p)', url: `https://img.youtube.com/vi/${videoId}/default.jpg` }
       ];
 
-      return res.json({
+      const result = {
         id: videoId,
         url: standardUrl,
         title: data.title || 'YouTube Video',
@@ -315,7 +360,10 @@ app.post('/api/info', async (req, res) => {
         thumbnails,
         videoFormats,
         audioFormats
-      });
+      };
+
+      setCachedInfo(videoId, result);
+      return res.json(result);
     } catch (parseErr) {
       console.error('JSON parse error from yt-dlp:', parseErr);
       return res.status(500).json({ error: 'Failed to process metadata from video downloader.' });
@@ -323,8 +371,8 @@ app.post('/api/info', async (req, res) => {
   });
 });
 
-// Download & Stream API using yt-dlp + FFmpeg + FFprobe validation
-app.get('/api/download', async (req, res) => {
+// Instant High-Speed Direct Stream Download API
+app.get('/api/download', (req, res) => {
   const { url, itag, format = 'mp4', title = 'video', quality = '' } = req.query;
 
   if (!url || typeof url !== 'string') {
@@ -336,7 +384,6 @@ app.get('/api/download', async (req, res) => {
     return res.status(400).json({ error: 'Invalid YouTube URL provided.' });
   }
 
-  // Check FFmpeg availability
   if (!ffmpegPath || !fs.existsSync(ffmpegPath)) {
     console.error('CRITICAL: FFmpeg binary not found at path:', ffmpegPath);
     return res.status(503).json({ error: 'FFmpeg processing dependency is unavailable on the server.' });
@@ -346,7 +393,6 @@ app.get('/api/download', async (req, res) => {
   const cleanTitle = sanitizeFilename(title);
   const ext = format === 'mp3' ? 'mp3' : 'mp4';
 
-  // Resolution selection
   let targetHeight = 1080;
   const qStr = String(quality).toLowerCase();
   if (qStr.includes('2160') || qStr.includes('4k')) targetHeight = 2160;
@@ -358,35 +404,35 @@ app.get('/api/download', async (req, res) => {
 
   const validItag = (itag && itag !== 'undefined' && itag !== 'null') ? String(itag).trim() : null;
 
-  const sessionDir = path.join(TMP_DIR, `dl_${videoId}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`);
-  fs.mkdirSync(sessionDir, { recursive: true });
+  const asciiFilename = `${cleanTitle.replace(/[^\x20-\x7E]/g, '_')}.${ext}`;
+  const utf8Filename = encodeURIComponent(`${cleanTitle}.${ext}`);
 
-  const tempOutputFile = path.join(sessionDir, `output.${ext}`);
+  // Send response headers IMMEDIATELY so browser download starts in under 2 seconds!
+  res.setHeader('Content-Disposition', `attachment; filename="${asciiFilename}"; filename*=UTF-8''${utf8Filename}`);
+  res.setHeader('Content-Type', format === 'mp3' ? 'audio/mpeg' : 'video/mp4');
+  res.setHeader('Transfer-Encoding', 'chunked');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.status(200);
 
-  // Formulate optimized yt-dlp arguments for MAXIMUM speed & multi-threaded fragment fetching
   const args = [
-    '--js-runtimes', 'node',
     '--cache-dir', CACHE_DIR,
     '--ffmpeg-location', ffmpegPath,
-    '-N', '8',                        // 8 concurrent fragment download connections
-    '--concurrent-fragments', '8',
-    '--throttled-rate', '100K',        // Automatically reset throttled HTTP connections
-    '--http-chunk-size', '10M',       // High throughput HTTP chunk buffer
+    '--concurrent-fragments', '16',
+    '-N', '16',
     '--socket-timeout', '15',
-    '--retries', '10',
-    '--fragment-retries', '10',
-    '--no-mtime',                     // Don't set file modification time (saves I/O)
-    '-S', `res:${targetHeight},ext:mp4:m4a` // Prefer fast MP4/H.264 streams requiring zero transcoding
+    '--retries', '5',
+    '--no-mtime',
+    '--no-playlist'
   ];
 
   if (format === 'mp3') {
     const audioSpec = validItag ? `${validItag}/ba/140/251/b` : 'ba/140/251/b';
     args.push(
       '-f', audioSpec,
-      '-x',                           // Extract audio directly
+      '-x',
       '--audio-format', 'mp3',
-      '--audio-quality', '0',         // Best VBR MP3 quality
-      '-o', tempOutputFile,
+      '--audio-quality', '0',
+      '-o', '-',
       videoUrl
     );
   } else {
@@ -397,79 +443,42 @@ app.get('/api/download', async (req, res) => {
     args.push(
       '-f', videoSpec,
       '--merge-output-format', 'mp4',
-      '-o', tempOutputFile,
+      '-o', '-',
       videoUrl
     );
   }
 
-  console.log(`[DOWNLOAD PROCESSING] Video ID: ${videoId} | Target: ${ext.toUpperCase()} ${targetHeight}p | Args: -N 8 --throttled-rate 100K`);
+  console.log(`[INSTANT STREAM START] Video ID: ${videoId} | Format: ${ext.toUpperCase()} ${targetHeight}p`);
 
-  execFile(YTDLP_PATH, args, { timeout: 180000 }, async (err, stdout, stderr) => {
-    if (err || !fs.existsSync(tempOutputFile)) {
-      console.error(`yt-dlp processing failed for ${videoId}:`, stderr || err?.message);
-      cleanupDir(sessionDir);
-      
-      const errLower = (stderr || err?.message || '').toLowerCase();
-      if (errLower.includes('private') || errLower.includes('unavailable')) {
-        return res.status(404).json({ error: 'Video is private or unavailable.' });
-      }
-      return res.status(500).json({ error: 'Video & audio download/merging process failed on server.' });
+  const ytProc = spawn(YTDLP_PATH, args);
+
+  ytProc.stdout.pipe(res);
+
+  let hasErrorLogged = false;
+  ytProc.stderr.on('data', (chunk) => {
+    const msg = chunk.toString();
+    if (msg.includes('ERROR:') && !hasErrorLogged) {
+      hasErrorLogged = true;
+      console.error(`[STREAM ERROR] ${videoId}:`, msg.trim());
     }
+  });
 
-    try {
-      // Validate merged file streams with FFprobe
-      const validation = await validateFileStreams(tempOutputFile);
-      console.log(`[FFPROBE VALIDATION] ${videoId} -> Streams:`, validation.streams.map(s => `${s.codec_type}:${s.codec_name}`).join(', '));
+  ytProc.on('error', (err) => {
+    console.error(`[SPAWN ERROR] ${videoId}:`, err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Failed to launch media stream pipeline.' });
+    } else {
+      res.end();
+    }
+  });
 
-      if (format === 'mp4' && (!validation.hasVideo || !validation.hasAudio)) {
-        console.error(`[VALIDATION ERROR] Output file for ${videoId} missing required streams (hasVideo: ${validation.hasVideo}, hasAudio: ${validation.hasAudio})`);
-        cleanupDir(sessionDir);
-        return res.status(422).json({ error: 'Generated video file lacks an audio stream. Download aborted.' });
-      }
-
-      if (format === 'mp3' && !validation.hasAudio) {
-        console.error(`[VALIDATION ERROR] Output file for ${videoId} missing audio stream`);
-        cleanupDir(sessionDir);
-        return res.status(422).json({ error: 'Generated audio file is invalid. Download aborted.' });
-      }
-
-      const stat = fs.statSync(tempOutputFile);
-      const asciiFilename = `${cleanTitle.replace(/[^\x20-\x7E]/g, '_')}.${ext}`;
-      const utf8Filename = encodeURIComponent(`${cleanTitle}.${ext}`);
-
-      res.setHeader('Content-Disposition', `attachment; filename="${asciiFilename}"; filename*=UTF-8''${utf8Filename}`);
-      res.setHeader('Content-Type', format === 'mp3' ? 'audio/mpeg' : 'video/mp4');
-      res.setHeader('Content-Length', stat.size);
-      res.status(200);
-
-      const readStream = fs.createReadStream(tempOutputFile);
-      readStream.pipe(res);
-
-      let cleanedUp = false;
-      const doCleanup = () => {
-        if (!cleanedUp) {
-          cleanedUp = true;
-          try {
-            readStream.destroy();
-          } catch (e) {}
-          cleanupDir(sessionDir);
-        }
-      };
-
-      readStream.on('end', doCleanup);
-      readStream.on('error', (streamErr) => {
-        console.error('ReadStream error:', streamErr);
-        doCleanup();
-      });
-
-      req.on('close', () => {
-        doCleanup();
-      });
-
-    } catch (validErr) {
-      console.error('FFprobe validation execution error:', validErr);
-      cleanupDir(sessionDir);
-      return res.status(500).json({ error: 'Failed to validate generated media streams.' });
+  // If client cancels download or closes browser tab, kill child process cleanly
+  req.on('close', () => {
+    if (!ytProc.killed) {
+      console.log(`[CLIENT DISCONNECT] Terminating stream process for ${videoId}`);
+      try {
+        ytProc.kill('SIGKILL');
+      } catch (e) {}
     }
   });
 });
