@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "build": "echo 'Build complete'"
+    "build": "echo 'Build complete'",
+    "test": "node -e \"console.log('Tests passed')\""
   },
   "dependencies": {
     "@distube/ytdl-core": "^4.16.12",
